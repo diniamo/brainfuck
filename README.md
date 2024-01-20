@@ -1,2 +1,2 @@
-# brainfuck
+# Brainfuck
 Brainfuck implementation in Rust
