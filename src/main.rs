@@ -1,5 +1,5 @@
-use std::io::{Read, Write};
 use bimap::BiHashMap;
+use std::io::{Read, Write};
 use std::path::Path;
 
 #[derive(PartialEq, Eq)]
@@ -120,7 +120,9 @@ fn main() {
                 data[data_pointer] = data[data_pointer].checked_sub(1).unwrap_or(u8::MAX)
             }
             Instruction::Output => {
-                stdout.write(&[data[data_pointer]]).expect("Failed to write to stdout");
+                stdout
+                    .write(&[data[data_pointer]])
+                    .expect("Failed to write to stdout");
             }
             Instruction::Input => {
                 let mut buf = [0u8; 1];
@@ -128,7 +130,7 @@ fn main() {
                     buf[0] = 0;
                 }
                 data[data_pointer] = buf[0];
-            },
+            }
             Instruction::LoopOpen => {
                 if data[data_pointer] == 0 {
                     instruction_pointer = *loop_map.get_by_left(&instruction_pointer).unwrap();
