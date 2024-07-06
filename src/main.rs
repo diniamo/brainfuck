@@ -1,8 +1,8 @@
-use bimap::BiHashMap;
-use std::io::{Read, Write};
+use std::{env, fs};
+use std::io::{self, Read, StdinLock, StdoutLock, Write};
 use std::path::Path;
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 enum Instruction {
     Right,
     Left,
@@ -31,66 +31,34 @@ impl From<char> for Instruction {
     }
 }
 
-fn find_closing_bracket(instructions: &[Instruction], index: usize) -> Option<usize> {
-    let mut inner_count = 0u32;
-    #[allow(clippy::needless_range_loop)]
-    for i in (index + 1)..instructions.len() {
-        let instruction = &instructions[i];
-        match instruction {
-            Instruction::LoopOpen => {
-                inner_count += 1;
-            }
-            Instruction::LoopClose => {
-                if inner_count == 0 {
-                    return Some(i);
-                } else {
-                    inner_count -= 1;
-                }
-            }
-            _ => {}
-        }
-    }
+struct Runtime<'a> {
+    pub data: [u8; 30_000],
+    pub data_pointer: usize,
 
-    None
+    pub stdout: StdoutLock<'a>,
+    pub stdin: StdinLock<'a>,
 }
 
-fn main() {
-    let argument = std::env::args()
-        .nth(1)
-        .expect("Please provide a file or a program as an argument");
+fn skip_loop(instructions: &[Instruction]) -> usize {
+    let mut level = 0u32;
 
-    let instructions: Vec<Instruction> =
-        if let Ok(contents) = std::fs::read_to_string(Path::new(&argument)) {
-            contents
-        } else {
-            argument
-        }
-        .chars()
-        .filter_map(|c| match c.into() {
-            Instruction::Invalid => None,
-            instruction => Some(instruction),
-        })
-        .collect();
-
-    let mut loop_map: BiHashMap<usize, usize> = BiHashMap::new();
     for (i, instruction) in instructions.iter().enumerate() {
-        if matches!(instruction, Instruction::LoopOpen) {
-            loop_map.insert(
-                i,
-                find_closing_bracket(&instructions, i).unwrap_or_else(|| {
-                    println!("Loop started at index {i} wasn't closed, terminating");
-                    std::process::exit(1);
-                }),
-            );
+        match instruction {
+            Instruction::LoopOpen => level += 1,
+            Instruction::LoopClose => level -= 1,
+            _ => (),
+        }
+
+        if level == 0 {
+            return i + 1;
         }
     }
 
-    let mut data = [0u8; 30_000];
-    let mut data_pointer = 0usize;
-    let mut instruction_pointer = 0usize;
+    unreachable!();
+}
 
-    let mut stdout = std::io::stdout().lock();
-    let mut stdin = std::io::stdin().lock();
+fn execute(instructions: &[Instruction], runtime: &mut Runtime) -> usize {
+    let mut instruction_pointer = 0usize;
 
     loop {
         if instruction_pointer >= instructions.len() {
@@ -98,58 +66,104 @@ fn main() {
         }
 
         let instruction = &instructions[instruction_pointer];
+
         match instruction {
             Instruction::Right => {
-                if data_pointer + 1 >= data.len() {
-                    data_pointer = 0
+                if runtime.data_pointer + 1 >= runtime.data.len() {
+                    runtime.data_pointer = 0
                 } else {
-                    data_pointer += 1
+                    runtime.data_pointer += 1
                 }
+
+                instruction_pointer += 1;
             }
             Instruction::Left => {
-                if data_pointer == 0 {
-                    data_pointer = data.len() - 1;
+                if runtime.data_pointer == 0 {
+                    runtime.data_pointer = runtime.data.len() - 1;
                 } else {
-                    data_pointer -= 1;
+                    runtime.data_pointer -= 1;
                 }
+
+                instruction_pointer += 1;
             }
             Instruction::Increment => {
-                data[data_pointer] = data[data_pointer].checked_add(1).unwrap_or(u8::MIN)
+                runtime.data[runtime.data_pointer] = runtime.data[runtime.data_pointer]
+                    .checked_add(1)
+                    .unwrap_or(u8::MIN);
+
+                instruction_pointer += 1;
             }
             Instruction::Decrement => {
-                data[data_pointer] = data[data_pointer].checked_sub(1).unwrap_or(u8::MAX)
+                runtime.data[runtime.data_pointer] = runtime.data[runtime.data_pointer]
+                    .checked_sub(1)
+                    .unwrap_or(u8::MAX);
+
+                instruction_pointer += 1;
             }
             Instruction::Output => {
-                stdout
-                    .write(&[data[data_pointer]])
+                runtime
+                    .stdout
+                    .write_all(&[runtime.data[runtime.data_pointer]])
                     .expect("Failed to write to stdout");
+
+                instruction_pointer += 1;
             }
             Instruction::Input => {
                 let mut buf = [0u8; 1];
-                if let Err(_) = stdin.read_exact(&mut buf) {
-                    buf[0] = 0;
-                }
-                data[data_pointer] = buf[0];
+                runtime.data[runtime.data_pointer] = if runtime.stdin.read_exact(&mut buf).is_ok() {
+                    buf[0]
+                } else {
+                    0
+                };
+
+                instruction_pointer += 1;
             }
             Instruction::LoopOpen => {
-                if data[data_pointer] == 0 {
-                    instruction_pointer = *loop_map.get_by_left(&instruction_pointer).unwrap();
+                if runtime.data[runtime.data_pointer] == 0 {
+                    instruction_pointer += skip_loop(&instructions[instruction_pointer..]);
                 } else {
-                    instruction_pointer += 1;
+                    instruction_pointer +=
+                        execute(&instructions[(instruction_pointer + 1)..], runtime) + 1;
                 }
             }
             Instruction::LoopClose => {
-                if data[data_pointer] != 0 {
-                    instruction_pointer = *loop_map.get_by_right(&instruction_pointer).unwrap();
+                if runtime.data[runtime.data_pointer] != 0 {
+                    instruction_pointer = 0;
                 } else {
-                    instruction_pointer += 1;
+                    return instruction_pointer + 1;
                 }
             }
-            Instruction::Invalid => panic!("Invalid instruction in sanitized set"),
-        }
-
-        if !matches!(instruction, Instruction::LoopOpen | Instruction::LoopClose) {
-            instruction_pointer += 1;
+            Instruction::Invalid => unreachable!(),
         }
     }
+
+    instruction_pointer
+}
+
+fn main() {
+    let argument = env::args()
+        .nth(1)
+        .expect("Please provide a file or a program as an argument");
+
+    let instructions = if let Ok(contents) = fs::read_to_string(Path::new(&argument)) {
+        contents
+    } else {
+        argument
+    }
+    .chars()
+    .filter_map(|c| match c.into() {
+        Instruction::Invalid => None,
+        instruction => Some(instruction),
+    })
+    .collect::<Box<[Instruction]>>();
+
+    let mut runtime = Runtime {
+        data: [0u8; 30_000],
+        data_pointer: 0,
+
+        stdout: io::stdout().lock(),
+        stdin: io::stdin().lock(),
+    };
+
+    execute(&instructions, &mut runtime);
 }
